@@ -31,9 +31,12 @@ void WebController::handleStatus() {
   json += "\"pan_real\":" + String(eixoPan->lerAnguloAbsolutoEncoder(), 1) + ",";
   json += "\"pan_rel\":" + String(eixoPan->lerAnguloRelativoEncoder(), 1) + ",";
   json += "\"pan_eixo\":" + String(eixoPan->getAnguloEixo(), 1) + ",";
+  json += "\"pan_vel\":" + String(eixoPan->getVelocidadeEixo(), 1) + ",";
+  
   json += "\"tilt_real\":" + String(eixoTilt->lerAnguloAbsolutoEncoder(), 1) + ",";
   json += "\"tilt_rel\":" + String(eixoTilt->lerAnguloRelativoEncoder(), 1) + ",";
-  json += "\"tilt_eixo\":" + String(eixoTilt->getAnguloEixo(), 1);
+  json += "\"tilt_eixo\":" + String(eixoTilt->getAnguloEixo(), 1) + ",";
+  json += "\"tilt_vel\":" + String(eixoTilt->getVelocidadeEixo(), 1);
   json += "}";
   server.send(200, "application/json", json);
 }

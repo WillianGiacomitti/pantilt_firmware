@@ -19,6 +19,7 @@ private:
   String nomeEixo;
   
   uint8_t canalI2C;
+  int current;
   float relacaoReducao;
   uint16_t microsteps;
   float passosPorGrauSaida;
@@ -30,12 +31,16 @@ private:
   float ultimoAnguloBruto = 0.0;
   float anguloAcumuladoEixo = 0.0;
 
+  unsigned long tempoUltimaLeituraVelocidade;
+  float anguloUltimaLeituraVelocidade;
+  float velocidadeRealAtual;
+
   void selecionarCanalI2C();
   void atualizarPosicaoEncoder();
 
 public:
   Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc, 
-       uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome);
+       uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome, int rmsCurrent);
 
   void begin();
   void setZero();
@@ -46,6 +51,7 @@ public:
   float lerAnguloAbsolutoEncoder();
   float lerAnguloRelativoEncoder();
   float getAnguloEixo();
+  float getVelocidadeEixo();
 
   void run();
 };

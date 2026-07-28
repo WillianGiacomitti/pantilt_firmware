@@ -29,8 +29,8 @@ AccelStepper motorTilt(AccelStepper::DRIVER, 25, 26); // Corrigido para os pinos
 
 AS5600 encoderShared;
 
-Eixo eixoPan(&driverPan, &motorPan, &encoderShared, 0, 17.0, 127.0, 2, "PAN");
-Eixo eixoTilt(&driverTilt, &motorTilt, &encoderShared, 1, 21.0, 64.0, 2, "TILT");
+Eixo eixoPan(&driverPan, &motorPan, &encoderShared, 0, 17.0, 127.0, 2, "PAN", 1200);
+Eixo eixoTilt(&driverTilt, &motorTilt, &encoderShared, 1, 21.0, 64.0, 2, "TILT", 800);
 
 WebController webController(&eixoPan, &eixoTilt);
 

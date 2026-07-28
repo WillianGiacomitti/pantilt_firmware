@@ -24,12 +24,13 @@ void Eixo::atualizarPosicaoEncoder() {
 }
 
 Eixo::Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc, 
-           uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome) 
+           uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome, int rmsCurrent) 
 {
   driver = drv;
   motor = mot;
   encoder = enc;
   canalI2C = canalMux;
+  current = rmsCurrent;
   microsteps = mSteps;
   nomeEixo = nome;
   
@@ -43,7 +44,7 @@ void Eixo::begin() {
   driver->toff(4);
   driver->blank_time(24);
   driver->mstep_reg_select(true);
-  driver->rms_current(1200);      
+  driver->rms_current(current);      
   driver->microsteps(microsteps); 
   driver->en_spreadCycle(false);   
 
@@ -53,6 +54,10 @@ void Eixo::begin() {
   // Inicializa o histórico do encoder
   ultimoAnguloBruto = lerAnguloAbsolutoEncoder();
   anguloAcumuladoEixo = 0.0;
+
+  tempoUltimaLeituraVelocidade = millis();
+  anguloUltimaLeituraVelocidade = 0.0;
+  velocidadeRealAtual = 0.0;
 }
 
 void Eixo::setZero() {
@@ -107,6 +112,28 @@ float Eixo::lerAnguloRelativoEncoder() {
 // RETORNA A POSIÇÃO REAL DETERMINADA PELO ENCODER
 float Eixo::getAnguloEixo() {
   return anguloAcumuladoEixo / relacaoReducao;
+}
+
+float Eixo::getVelocidadeEixo() {
+  unsigned long tempoAtual = millis();
+  
+  // Calcula o tempo decorrido em segundos
+  float deltaTempo = (tempoAtual - tempoUltimaLeituraVelocidade) / 1000.0;
+
+  // Atualiza a velocidade real apenas se o tempo de amostragem for atingido (50 ms)
+  // Isso evita ruído de quantização na leitura da velocidade
+  if (deltaTempo >= 0.05) { 
+    float anguloAtual = getAnguloEixo();
+    
+    // Cálculo derivativo: v = d(theta) / dt
+    velocidadeRealAtual = (anguloAtual - anguloUltimaLeituraVelocidade) / deltaTempo;
+    
+    // Armazena os valores atuais para o próximo ciclo
+    anguloUltimaLeituraVelocidade = anguloAtual;
+    tempoUltimaLeituraVelocidade = tempoAtual;
+  }
+  
+  return velocidadeRealAtual;
 }
 
 void Eixo::run() {
