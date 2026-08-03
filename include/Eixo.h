@@ -2,58 +2,73 @@
 #define EIXO_H
 
 #include <Arduino.h>
-#include <AccelStepper.h>
 #include <TMCStepper.h>
+#include <AccelStepper.h>
 #include <AS5600.h>
 #include <Wire.h>
 
 #define ENDERECO_PCA9548A 0x70
 
-enum ModoOperacao { MODO_POSICAO, MODO_VELOCIDADE };
+enum ModoOperacao {
+  MODO_POSICAO,
+  MODO_VELOCIDADE
+};
 
 class Eixo {
 private:
   TMC2209Stepper* driver;
   AccelStepper* motor;
   AS5600* encoder;
-  String nomeEixo;
-  
   uint8_t canalI2C;
-  int current;
-  float relacaoReducao;
+  uint16_t current;
   uint16_t microsteps;
+  String nomeEixo;
+
+  float relacaoReducao;
   float passosPorGrauSaida;
   
-  float offsetZeroEncoder = 0.0;
-  ModoOperacao modoAtual = MODO_POSICAO;
-  float velocidadeAtualDegSec = 0.0;
-
-  float ultimoAnguloBruto = 0.0;
-  float anguloAcumuladoEixo = 0.0;
-
+  // Variáveis de Telemetria e Posição Real
+  float ultimoAnguloBruto;
+  float anguloAcumuladoEixo;
   unsigned long tempoUltimaLeituraVelocidade;
   float anguloUltimaLeituraVelocidade;
   float velocidadeRealAtual;
 
+  // Variáveis do Limitador de Taxa de Variação (Rampa Iterativa)
+  float velocidadeAlvoDegSec;
+  float velocidadeComandadaDegSec;
+  float aceleracaoDegSec2;
+  unsigned long tempoUltimaAtualizacaoRampa;
+
+  ModoOperacao modoAtual;
+
   void selecionarCanalI2C();
-  void atualizarPosicaoEncoder();
 
 public:
   Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc, 
-       uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome, int rmsCurrent);
+       uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome, uint16_t rmsCurrent);
 
   void begin();
+  
+  // Controle de Parâmetros e Posição
   void setZero();
+  void setAceleracao(float grausPorSegundo2);
   void setVelocidadeMaxima(float grausPorSegundo);
-  void moverParaGrausRelativo(float anguloRelativo);
+  void moverParaGrausAbsoluto(float anguloAbsoluto);
+  
+  // Controle de Velocidade Contínua
   void iniciarMovimentoContinuo(float grausPorSegundo);
+  void processarRampaVelocidade();
   void parar();
+
+  // Sensores e Telemetria
   float lerAnguloAbsolutoEncoder();
-  float lerAnguloRelativoEncoder();
+  void atualizarPosicaoEncoder();
   float getAnguloEixo();
   float getVelocidadeEixo();
 
-  void run();
+  // Acionamento Físico
+  void runStep();
 };
 
 #endif
