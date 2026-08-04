@@ -42,7 +42,7 @@ private:
 
   ModoOperacao modoAtual;
 
-  void selecionarCanalI2C();
+  bool selecionarCanalI2C();
 
 public:
   Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc, 
@@ -62,8 +62,8 @@ public:
   void parar();
 
   // Sensores e Telemetria
-  float lerAnguloAbsolutoEncoder();
-  void atualizarPosicaoEncoder();
+  bool lerAnguloAbsolutoEncoder(float* outDeg);
+  bool atualizarPosicaoEncoder();
   float getAnguloEixo();
   float getVelocidadeEixo();
 

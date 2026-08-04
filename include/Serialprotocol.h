@@ -28,7 +28,20 @@ enum SerialMsgType : uint8_t {
   MSG_SET_ZERO_REQ = 0x04, // Host  -> ESP32  (sem payload)
   MSG_SET_ZERO_ACK = 0x05, // ESP32 -> Host   (SetZeroAckPayload)
   MSG_HEARTBEAT    = 0x06, // Bidirecional    (sem payload)
+  MSG_ERROR        = 0x07, // ESP32 -> Host   (ErrorPayload)
+  MSG_BOOT_INFO    = 0x08, // ESP32 -> Host   (BootInfoPayload) - enviado 1x ao ligar/reconectar
 };
+
+// ---------------------- Códigos de erro (ErrorPayload.code) ----------------------
+// Cada número representa um tipo de problema diferente, para facilitar log/estatística
+// no host sem precisar mandar strings pela serial.
+#define ERR_I2C_TIMEOUT_PAN     1  // leitura do encoder PAN falhou (timeout/NACK no mux ou sensor)
+#define ERR_I2C_TIMEOUT_TILT    2  // leitura do encoder TILT falhou
+#define ERR_I2C_BUS_RECOVERED   3  // barramento I2C estava travado; rotina de recuperação foi acionada
+#define ERR_FAILSAFE_TRIGGERED  4  // motores parados por perda de comunicação com o host
+#define ERR_CMD_POS_INVALID     5  // frame MSG_CMD_POS recebido com payload de tamanho inválido
+#define ERR_CMD_VEL_INVALID     6  // frame MSG_CMD_VEL recebido com payload de tamanho inválido
+#define ERR_LOW_HEAP            7  // memória heap livre abaixo do limite de segurança
 
 #pragma pack(push, 1)
 struct TelemetryPayload {
@@ -50,6 +63,15 @@ struct CmdVelPayload {
 
 struct SetZeroAckPayload {
   uint8_t success;
+};
+
+struct ErrorPayload {
+  uint8_t code; // ver defines ERR_* acima
+};
+
+struct BootInfoPayload {
+  uint8_t reset_reason;  // valor bruto de esp_reset_reason() (enum esp_reset_reason_t do ESP-IDF)
+  uint32_t free_heap;    // bytes livres de heap no momento do boot
 };
 #pragma pack(pop)
 

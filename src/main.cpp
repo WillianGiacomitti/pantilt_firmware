@@ -4,6 +4,7 @@
 #include <AccelStepper.h>
 #include <AS5600.h>
 #include "esp_task_wdt.h"
+#include "esp_system.h"
 
 #include "Eixo.h"
 #include "SerialProtocol.h"
@@ -15,13 +16,18 @@
 #define EN_PIN 27
 #define LED_STATUS 2
 
+#define SDA_PIN 21
+#define SCL_PIN 22
+
 #define SERIAL_BAUD 921600
 #define TELEMETRY_HZ 20
 #define ENCODER_HZ 50
-#define FAILSAFE_TIMEOUT_MS 500   // sem comando/heartbeat -> para os motores
-#define I2C_TIMEOUT_MS 30         // limite de bloqueio do barramento I2C
-#define WDT_TIMEOUT_S 3           // se uma task não "der sinal de vida" nesse tempo, reseta
-
+#define FAILSAFE_TIMEOUT_MS 500     // sem comando/heartbeat -> para os motores
+#define I2C_TIMEOUT_MS 30           // limite de bloqueio de qualquer transação I2C
+#define I2C_CLOCK_HZ 100000         // 100kHz: mais lento, bem mais tolerante a ruído que 400kHz
+#define WDT_TIMEOUT_S 3             // task sem "sinal de vida" por esse tempo -> reset automático
+#define MAX_FALHAS_I2C_CONSECUTIVAS 5
+#define HEAP_MINIMO_BYTES 20000
 
 // ---------------- Hardware ----------------
 TMC2209Stepper driverPan(&Serial2, R_SENSE, 0b00);
@@ -39,20 +45,57 @@ TaskHandle_t TaskMotoresHandle;
 TaskHandle_t TaskSerialHandle;
 TaskHandle_t TaskEncoderHandle;
 
+SemaphoreHandle_t serialMutex; // protege escrita concorrente na Serial (TaskSerial + TaskEncoder)
+
 // ---------------- Estado compartilhado (encoder -> serial) ----------------
-// Escrito só por TaskEncoder, lido só por TaskSerial. Cada variável é lida/escrita
-// atomicamente (floats de 32 bits alinhados no ESP32), então não usamos mutex aqui
-// para não introduzir mais um ponto de bloqueio entre as tasks.
 volatile float g_pan_pos_deg = 0, g_pan_vel_deg = 0;
 volatile float g_tilt_pos_deg = 0, g_tilt_vel_deg = 0;
 
 // ---------------- Estado da ponte serial ----------------
 volatile unsigned long lastCmdMillis = 0;
 
+// Envio thread-safe de frames (usado por TaskSerial e TaskEncoder)
+bool sendFrameSafe(uint8_t type, const uint8_t* payload, uint8_t len) {
+  if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    bool ok = SerialFramer::sendFrame(Serial, type, payload, len);
+    xSemaphoreGive(serialMutex);
+    return ok;
+  }
+  return false; // não conseguiu o mutex a tempo; não trava, só descarta esse envio
+}
+
+void reportError(uint8_t code) {
+  ErrorPayload err{code};
+  sendFrameSafe(MSG_ERROR, (uint8_t*)&err, sizeof(err));
+}
+
+// ---------------- Recuperação manual do barramento I2C ----------------
+// Se um dispositivo travar segurando SDA em nível baixo (clock stretching preso),
+// gera até 9 pulsos de clock manualmente para liberar, depois um STOP, e reinicia o Wire.
+void recuperarBarramentoI2C() {
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, OUTPUT);
+
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(SCL_PIN, HIGH); delayMicroseconds(5);
+    digitalWrite(SCL_PIN, LOW);  delayMicroseconds(5);
+  }
+
+  // Gera condição de STOP manualmente (SDA sobe enquanto SCL está em HIGH)
+  pinMode(SDA_PIN, OUTPUT);
+  digitalWrite(SDA_PIN, LOW);  delayMicroseconds(5);
+  digitalWrite(SCL_PIN, HIGH); delayMicroseconds(5);
+  digitalWrite(SDA_PIN, HIGH); delayMicroseconds(5);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(I2C_CLOCK_HZ);
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
+}
+
 void onSerialFrame(uint8_t type, const uint8_t* payload, uint8_t len) {
   switch (type) {
     case MSG_CMD_POS: {
-      if (len != sizeof(CmdPosPayload)) return;
+      if (len != sizeof(CmdPosPayload)) { reportError(ERR_CMD_POS_INVALID); return; }
       CmdPosPayload p;
       memcpy(&p, payload, len);
       eixoPan.moverParaGrausAbsoluto(p.pan_rad * RAD_TO_DEG);
@@ -61,7 +104,7 @@ void onSerialFrame(uint8_t type, const uint8_t* payload, uint8_t len) {
       break;
     }
     case MSG_CMD_VEL: {
-      if (len != sizeof(CmdVelPayload)) return;
+      if (len != sizeof(CmdVelPayload)) { reportError(ERR_CMD_VEL_INVALID); return; }
       CmdVelPayload p;
       memcpy(&p, payload, len);
       float pan_dps = p.pan_rad_s * RAD_TO_DEG;
@@ -80,7 +123,7 @@ void onSerialFrame(uint8_t type, const uint8_t* payload, uint8_t len) {
       eixoPan.setZero();
       eixoTilt.setZero();
       SetZeroAckPayload ack{1};
-      SerialFramer::sendFrame(Serial, MSG_SET_ZERO_ACK, (uint8_t*)&ack, sizeof(ack));
+      sendFrameSafe(MSG_SET_ZERO_ACK, (uint8_t*)&ack, sizeof(ack));
       lastCmdMillis = millis();
       break;
     }
@@ -94,7 +137,7 @@ SerialFramer framer(onSerialFrame);
 
 // ---------------- Tasks ----------------
 
-// Core 1: Geração contínua de passos e processamento de trajetória
+// Core 1: geração contínua de passos e processamento de trajetória
 void TaskMotores(void* pvParameters) {
   esp_task_wdt_add(NULL);
   for (;;) {
@@ -105,28 +148,47 @@ void TaskMotores(void* pvParameters) {
     eixoTilt.runStep();
 
     esp_task_wdt_reset();
-    vTaskDelay(1); // cede tempo para a idle task (evita watchdog reset por starvation)
+    vTaskDelay(1);
   }
 }
 
-// Core 0: SÓ leitura dos encoders via I2C. Isolada para que um travamento do
-// barramento não derrube a comunicação serial nem o fail-safe.
+// Core 0: SÓ leitura dos encoders via I2C, com detecção de falha e auto-recuperação.
+// Isolada para que um travamento do barramento não derrube a serial nem o fail-safe.
 void TaskEncoder(void* pvParameters) {
   esp_task_wdt_add(NULL);
+
+  uint8_t falhasPan = 0, falhasTilt = 0;
 
   TickType_t lastWake = xTaskGetTickCount();
   const TickType_t period = pdMS_TO_TICKS(1000 / ENCODER_HZ);
 
   for (;;) {
-    eixoPan.atualizarPosicaoEncoder();
-    eixoTilt.atualizarPosicaoEncoder();
+    if (eixoPan.atualizarPosicaoEncoder()) {
+      falhasPan = 0;
+      g_pan_pos_deg = eixoPan.getAnguloEixo();
+      g_pan_vel_deg = eixoPan.getVelocidadeEixo();
+    } else {
+      falhasPan++;
+      reportError(ERR_I2C_TIMEOUT_PAN);
+    }
 
-    g_pan_pos_deg  = eixoPan.getAnguloEixo();
-    g_pan_vel_deg  = eixoPan.getVelocidadeEixo();
-    g_tilt_pos_deg = eixoTilt.getAnguloEixo();
-    g_tilt_vel_deg = eixoTilt.getVelocidadeEixo();
+    if (eixoTilt.atualizarPosicaoEncoder()) {
+      falhasTilt = 0;
+      g_tilt_pos_deg = eixoTilt.getAnguloEixo();
+      g_tilt_vel_deg = eixoTilt.getVelocidadeEixo();
+    } else {
+      falhasTilt++;
+      reportError(ERR_I2C_TIMEOUT_TILT);
+    }
 
-    esp_task_wdt_reset(); // só chega aqui se a leitura I2C não travou -> "prova de vida"
+    if (falhasPan >= MAX_FALHAS_I2C_CONSECUTIVAS || falhasTilt >= MAX_FALHAS_I2C_CONSECUTIVAS) {
+      recuperarBarramentoI2C();
+      reportError(ERR_I2C_BUS_RECOVERED);
+      falhasPan = 0;
+      falhasTilt = 0;
+    }
+
+    esp_task_wdt_reset();
     vTaskDelayUntil(&lastWake, period);
   }
 }
@@ -141,6 +203,13 @@ void TaskSerial(void* pvParameters) {
 
   digitalWrite(LED_STATUS, HIGH); delay(200); digitalWrite(LED_STATUS, LOW);
 
+  // Informa ao host o motivo do boot/reset anterior + heap livre
+  BootInfoPayload boot{};
+  boot.reset_reason = (uint8_t)esp_reset_reason();
+  boot.free_heap = ESP.getFreeHeap();
+  sendFrameSafe(MSG_BOOT_INFO, (uint8_t*)&boot, sizeof(boot));
+
+  bool failsafeAtivo = false;
   TickType_t lastWake = xTaskGetTickCount();
   const TickType_t period = pdMS_TO_TICKS(1000 / TELEMETRY_HZ);
 
@@ -152,6 +221,16 @@ void TaskSerial(void* pvParameters) {
     if (millis() - lastCmdMillis > FAILSAFE_TIMEOUT_MS) {
       eixoPan.parar();
       eixoTilt.parar();
+      if (!failsafeAtivo) { // reporta só na borda de subida, não a cada ciclo
+        reportError(ERR_FAILSAFE_TRIGGERED);
+        failsafeAtivo = true;
+      }
+    } else {
+      failsafeAtivo = false;
+    }
+
+    if (ESP.getFreeHeap() < HEAP_MINIMO_BYTES) {
+      reportError(ERR_LOW_HEAP);
     }
 
     TelemetryPayload t;
@@ -159,7 +238,7 @@ void TaskSerial(void* pvParameters) {
     t.pan_vel_rad  = g_pan_vel_deg  * DEG_TO_RAD;
     t.tilt_pos_rad = g_tilt_pos_deg * DEG_TO_RAD;
     t.tilt_vel_rad = g_tilt_vel_deg * DEG_TO_RAD;
-    SerialFramer::sendFrame(Serial, MSG_TELEMETRY, (uint8_t*)&t, sizeof(t));
+    sendFrameSafe(MSG_TELEMETRY, (uint8_t*)&t, sizeof(t));
 
     esp_task_wdt_reset();
     vTaskDelayUntil(&lastWake, period);
@@ -173,9 +252,9 @@ void setup() {
   pinMode(EN_PIN, OUTPUT);
   digitalWrite(EN_PIN, LOW);
 
-  Wire.begin(21, 22);
-  Wire.setClock(400000);
-  Wire.setTimeOut(I2C_TIMEOUT_MS); // limita o bloqueio máximo de qualquer transação I2C
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(I2C_CLOCK_HZ);      // 100kHz: mais robusto a ruído que 400kHz
+  Wire.setTimeOut(I2C_TIMEOUT_MS);
 
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
   digitalWrite(LED_STATUS, HIGH); delay(150); digitalWrite(LED_STATUS, LOW); delay(150);
@@ -186,8 +265,8 @@ void setup() {
   eixoTilt.begin();
   digitalWrite(LED_STATUS, HIGH); delay(150); digitalWrite(LED_STATUS, LOW); delay(150);
 
-  // Task Watchdog: se qualquer task registrada não chamar esp_task_wdt_reset()
-  // dentro do timeout, a ESP32 reinicia sozinha em vez de ficar travada/lenta.
+  serialMutex = xSemaphoreCreateMutex();
+
   esp_task_wdt_init(WDT_TIMEOUT_S, true /* panic -> reinicia */);
 
   xTaskCreatePinnedToCore(TaskMotores, "TaskMotores", 2048, NULL, 2, &TaskMotoresHandle, 1);

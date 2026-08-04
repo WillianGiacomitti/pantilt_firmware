@@ -22,11 +22,12 @@ Eixo::Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc,
   modoAtual = MODO_POSICAO;
 }
 
-void Eixo::selecionarCanalI2C() {
+bool Eixo::selecionarCanalI2C() {
   Wire.beginTransmission(ENDERECO_PCA9548A);
   Wire.write(1 << canalI2C);
-  Wire.endTransmission();
+  uint8_t status = Wire.endTransmission();
   delayMicroseconds(20);
+  return (status == 0); // 0 = ACK recebido do mux; qualquer outro valor = falha/timeout
 }
 
 void Eixo::begin() {
@@ -41,7 +42,13 @@ void Eixo::begin() {
   motor->setMaxSpeed(30.0 * passosPorGrauSaida);     
   motor->setAcceleration(15.0 * passosPorGrauSaida); 
 
-  ultimoAnguloBruto = lerAnguloAbsolutoEncoder();
+  float anguloInicial = 0.0f;
+  if (!lerAnguloAbsolutoEncoder(&anguloInicial)) {
+    // Falha na primeira leitura (boot): assume 0 e deixa a task de encoder
+    // corrigir/reportar erro nos próximos ciclos.
+    anguloInicial = 0.0f;
+  }
+  ultimoAnguloBruto = anguloInicial;
   anguloAcumuladoEixo = 0.0;
 
   tempoUltimaLeituraVelocidade = millis();
@@ -109,14 +116,21 @@ void Eixo::parar() {
   velocidadeAlvoDegSec = 0.0f;
 }
 
-float Eixo::lerAnguloAbsolutoEncoder() {
-  selecionarCanalI2C();
+bool Eixo::lerAnguloAbsolutoEncoder(float* outDeg) {
+  if (!selecionarCanalI2C()) {
+    return false; // mux não respondeu (ACK ausente / barramento travado)
+  }
   uint16_t bruto = encoder->readAngle();
-  return bruto * (360.0f / 4096.0f);
+  *outDeg = bruto * (360.0f / 4096.0f);
+  return true;
 }
 
-void Eixo::atualizarPosicaoEncoder() {
-  float atualBruto = lerAnguloAbsolutoEncoder();
+bool Eixo::atualizarPosicaoEncoder() {
+  float atualBruto;
+  if (!lerAnguloAbsolutoEncoder(&atualBruto)) {
+    return false; // mantém último ângulo válido conhecido, não atualiza o acumulado
+  }
+
   float delta = atualBruto - ultimoAnguloBruto;
 
   if (delta > 180.0f) {
@@ -127,6 +141,7 @@ void Eixo::atualizarPosicaoEncoder() {
 
   anguloAcumuladoEixo += delta;
   ultimoAnguloBruto = atualBruto;
+  return true;
 }
 
 float Eixo::getAnguloEixo() {
