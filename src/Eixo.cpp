@@ -1,7 +1,8 @@
 #include "Eixo.h"
 
 Eixo::Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc, 
-           uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome, uint16_t rmsCurrent) 
+           uint8_t canalMux, float dentesMotor, float dentesSaida, uint16_t mSteps, String nome, uint16_t rmsCurrent,
+           uint8_t pinoOut, ModoLeituraEncoder modoInicial) 
 {
   driver = drv;
   motor = mot;
@@ -10,6 +11,8 @@ Eixo::Eixo(TMC2209Stepper* drv, AccelStepper* mot, AS5600* enc,
   current = rmsCurrent;
   microsteps = mSteps;
   nomeEixo = nome;
+  pinoAnalogico = pinoOut;
+  modoLeitura = modoInicial;
   
   relacaoReducao = dentesSaida / dentesMotor;
   float passosPorVoltaMotor = 200.0 * (microsteps == 0 ? 1 : microsteps);
@@ -30,6 +33,17 @@ bool Eixo::selecionarCanalI2C() {
   return (status == 0); // 0 = ACK recebido do mux; qualquer outro valor = falha/timeout
 }
 
+void Eixo::setModoLeituraEncoder(ModoLeituraEncoder modo) {
+  if (modo == ENCODER_MODO_ANALOGICO && pinoAnalogico == PINO_ANALOGICO_INDEFINIDO) {
+    return; // não permite trocar pra analógico se nenhum pino foi configurado no construtor
+  }
+  modoLeitura = modo;
+}
+
+ModoLeituraEncoder Eixo::getModoLeituraEncoder() {
+  return modoLeitura;
+}
+
 void Eixo::begin() {
   driver->begin();
   driver->toff(4);
@@ -41,6 +55,11 @@ void Eixo::begin() {
 
   motor->setMaxSpeed(30.0 * passosPorGrauSaida);     
   motor->setAcceleration(15.0 * passosPorGrauSaida); 
+
+  if (pinoAnalogico != PINO_ANALOGICO_INDEFINIDO) {
+    pinMode(pinoAnalogico, INPUT);
+    analogSetPinAttenuation(pinoAnalogico, ADC_11db); // permite ler a faixa completa ~0-3.3V
+  }
 
   float anguloInicial = 0.0f;
   if (!lerAnguloAbsolutoEncoder(&anguloInicial)) {
@@ -116,13 +135,44 @@ void Eixo::parar() {
   velocidadeAlvoDegSec = 0.0f;
 }
 
-bool Eixo::lerAnguloAbsolutoEncoder(float* outDeg) {
+// ---------------- Leitura via I2C (AS5600 atrás do mux PCA9548A) ----------------
+bool Eixo::lerAnguloViaI2C(float* outDeg) {
   if (!selecionarCanalI2C()) {
     return false; // mux não respondeu (ACK ausente / barramento travado)
   }
   uint16_t bruto = encoder->readAngle();
   *outDeg = bruto * (360.0f / 4096.0f);
   return true;
+}
+
+// ---------------- Leitura via saída analógica (pino OUT do AS5600) ----------------
+bool Eixo::lerAnguloViaAnalogico(float* outDeg) {
+  if (pinoAnalogico == PINO_ANALOGICO_INDEFINIDO) {
+    return false; // nenhum pino configurado para este eixo
+  }
+
+  // Múltiplas amostras para reduzir o ruído típico do ADC do ESP32
+  uint32_t soma = 0;
+  const uint8_t N_AMOSTRAS = 8;
+  for (uint8_t i = 0; i < N_AMOSTRAS; i++) {
+    soma += analogRead(pinoAnalogico);
+  }
+  uint16_t media = soma / N_AMOSTRAS;
+
+  // ESP32 ADC: 12 bits (0-4095) ~ 0-3.3V, mapeado linearmente para 0-360°.
+  // Se a saída OUT do seu AS5600 não cobrir a faixa completa 0-VCC (depende
+  // da configuração ANGLE/OUT nos registradores do sensor), pode ser necessário
+  // calibrar min/max aqui em vez de assumir 0-4095 direto.
+  *outDeg = (media / 4095.0f) * 360.0f;
+  return true;
+}
+
+// ---------------- Dispatcher: escolhe I2C ou analógico conforme o modo ----------------
+bool Eixo::lerAnguloAbsolutoEncoder(float* outDeg) {
+  if (modoLeitura == ENCODER_MODO_ANALOGICO) {
+    return lerAnguloViaAnalogico(outDeg);
+  }
+  return lerAnguloViaI2C(outDeg);
 }
 
 bool Eixo::atualizarPosicaoEncoder() {

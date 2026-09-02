@@ -19,6 +19,14 @@
 #define SDA_PIN 21
 #define SCL_PIN 22
 
+#define PINO_OUT_PAN  34
+#define PINO_OUT_TILT 35
+
+// Deixe true se QUALQUER eixo usar ENCODER_MODO_I2C. Como você está usando
+// só o modo analógico nos dois, isso pula Wire.begin()/setClock()/setTimeOut()
+// por completo - libera os pinos 21/22 e não inicializa o periférico à toa.
+#define USAR_I2C false
+
 #define SERIAL_BAUD 921600
 #define TELEMETRY_HZ 20
 #define ENCODER_HZ 50
@@ -38,8 +46,10 @@ AccelStepper motorTilt(AccelStepper::DRIVER, 25, 26);
 
 AS5600 encoderShared;
 
-Eixo eixoPan(&driverPan, &motorPan, &encoderShared, 0, 17.0, 127.0, 2, "PAN", 1200);
-Eixo eixoTilt(&driverTilt, &motorTilt, &encoderShared, 1, 21.0, 64.0, 2, "TILT", 800);
+Eixo eixoPan(&driverPan, &motorPan, &encoderShared, 0, 17.0, 127.0, 2, "PAN", 1200,
+             PINO_OUT_PAN, ENCODER_MODO_ANALOGICO);
+Eixo eixoTilt(&driverTilt, &motorTilt, &encoderShared, 1, 21.0, 64.0, 2, "TILT", 800,
+              PINO_OUT_TILT, ENCODER_MODO_ANALOGICO);
 
 TaskHandle_t TaskMotoresHandle;
 TaskHandle_t TaskSerialHandle;
@@ -252,9 +262,11 @@ void setup() {
   pinMode(EN_PIN, OUTPUT);
   digitalWrite(EN_PIN, LOW);
 
+#if USAR_I2C
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(I2C_CLOCK_HZ);      // 100kHz: mais robusto a ruído que 400kHz
   Wire.setTimeOut(I2C_TIMEOUT_MS);
+#endif
 
   Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
   digitalWrite(LED_STATUS, HIGH); delay(150); digitalWrite(LED_STATUS, LOW); delay(150);
