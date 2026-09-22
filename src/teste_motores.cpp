@@ -12,6 +12,8 @@
 #define DIR_PIN_2  26  // Escolha pinos livres no seu ESP32
 #define DRIVER_2_ADDRESS 0b01  // MS1=VIO (3.3V), MS2=GND
 
+#define ENABLE_PIN 27  // Pino de habilitação compartilhado para ambos os drivers (opcional)
+
 // Configurações Comuns
 #define RXD2 16
 #define TXD2 17
@@ -39,6 +41,8 @@ void setup() {
     Serial2.read();
   }
   delay(100); 
+  pinMode(ENABLE_PIN, OUTPUT);
+  digitalWrite(ENABLE_PIN, LOW); // Habilita os drivers
 
   // Inicializa ambos os drivers
   driver1.begin();
