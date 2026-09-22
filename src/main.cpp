@@ -1,11 +1,12 @@
 #include <Arduino.h>
+
 #include <Wire.h>
 #include <TMCStepper.h>
 #include <AccelStepper.h>
 #include <AS5600.h>
+
 #include "esp_task_wdt.h"
 #include "esp_system.h"
-
 #include "Eixo.h"
 #include "SerialProtocol.h"
 
